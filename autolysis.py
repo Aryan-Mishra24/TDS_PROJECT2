@@ -8,9 +8,11 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import httpx
 import json
+import requests
 from sklearn.ensemble import RandomForestRegressor
 from dotenv import load_dotenv
 from tenacity import retry, stop_after_attempt, wait_exponential
+import stat
 
 # Load environment variables
 load_dotenv()
@@ -18,8 +20,17 @@ load_dotenv()
 def load_data(filepath, encoding='ISO-8859-1'):
     """
     Load CSV file and perform initial data exploration.
+    Supports both local files and URLs.
     """
     try:
+        if filepath.startswith("http://") or filepath.startswith("https://"):
+            response = requests.get(filepath)
+            response.raise_for_status()
+            temp_file = "temp_dataset.csv"
+            with open(temp_file, "wb") as f:
+                f.write(response.content)
+            filepath = temp_file
+
         df = pd.read_csv(filepath, encoding=encoding)
         print(f"Data Loaded Successfully\nDataset Shape: {df.shape}")
         print(df.info())
@@ -128,11 +139,12 @@ def generate_readme(df, analyses):
         logging.error(f"Request error: {e}")
         sys.exit(1)
 
-def sanitize_path(path):
+def onerror(func, path, exc_info):
     """
-    Sanitize file paths to prevent potential issues.
+    Error handler for shutil.rmtree to handle readonly files.
     """
-    return os.path.abspath(path)
+    os.chmod(path, stat.S_IWRITE)
+    func(path)
 
 def move_files(output_folder):
     """
@@ -146,17 +158,23 @@ def main():
     filepath = input("Enter the path to the dataset: ").strip()
     encoding = input("Enter the file encoding (default 'ISO-8859-1'): ").strip() or 'ISO-8859-1'
 
-    sanitized_filepath = sanitize_path(filepath)
-
-    if not os.path.exists(sanitized_filepath):
+    if filepath.startswith("http://") or filepath.startswith("https://"):
+        logging.info("Downloading dataset from URL...")
+    elif not os.path.exists(filepath):
         logging.error("Input file not found.")
         sys.exit(1)
 
-    df = load_data(sanitized_filepath, encoding=encoding)
+    df = load_data(filepath, encoding=encoding)
     analyses = analyze_data(df)
     create_visualizations(df, analyses)
     generate_readme(df, analyses)
-    move_files(os.path.dirname(sanitized_filepath))
+
+    try:
+        move_files(os.path.dirname(filepath))
+    except PermissionError as e:
+        logging.error(f"Permission error during file move: {e}")
+        shutil.rmtree(os.path.dirname(filepath), onerror=onerror)
 
 if __name__ == "__main__":
     main()
+
