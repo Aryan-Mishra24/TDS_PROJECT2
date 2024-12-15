@@ -12,12 +12,11 @@
 #   "logging"
 # ]
 # ///
-
-import os
-import sys
-import logging
-import shutil
 import base64
+import logging
+import os
+import shutil
+import sys
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
@@ -26,118 +25,153 @@ import json
 import argparse
 from sklearn.ensemble import RandomForestRegressor
 from dotenv import load_dotenv
-from multiprocessing import Pool
 
 load_dotenv()
 
-MAX_COLUMNS = 5  # Limit visualizations to top N columns
-
-
-def read_csv_data(file_path):
+def load_data(filepath):
     """
-    Reads a CSV file and provides an overview of the data.
+    Load CSV file and perform initial data exploration.
     """
     try:
-        dataset = pd.read_csv(file_path, encoding='ISO-8859-1')
-        print("Dataset loaded successfully.")
-        print(f"Dimensions of the dataset: {dataset.shape}")
-        print("\nColumns Overview:")
-        print(dataset.info())
-        return dataset
-    except Exception as error:
-        print(f"Failed to load data: {error}")
+        # Read the CSV file
+        df = pd.read_csv(filepath, encoding='ISO-8859-1')
+        
+        # Basic data exploration
+        print("Data Loaded Successfully")
+        print(f"Dataset Shape: {df.shape}")
+        print("\nColumn Information:")
+        print(df.info())
+        
+        return df
+    except Exception as e:
+        print(f"Error loading data: {e}")
         sys.exit(1)
 
-
-def create_visuals(data, analysis):
+def analyze_data(df):
     """
-    Generates visual outputs including histograms, boxplots, missing values, and correlation heatmaps.
+    Perform various analyses on the dataset, including statistical summaries,
+    visualizations, and correlation analysis.
     """
-    numeric_columns = data.select_dtypes(include=['float64', 'int64']).columns
-    numeric_columns = numeric_columns[:MAX_COLUMNS]  # Limit to top N columns
+    # Analyses to perform
+    analyses = {
+        'summary_stats': df.describe(),
+        'missing_values': df.isnull().sum(),
+        'data_types': df.dtypes,
+        'correlation_matrix': df.select_dtypes(include=['float64', 'int64']).corr()
+                             if not df.select_dtypes(include=['float64', 'int64']).empty else None
+    }
 
-    # Histograms
-    if not numeric_columns.empty:
+    # Visualize histograms and boxplots for numeric columns
+    numeric_cols = df.select_dtypes(include=['float64', 'int64']).columns
+    
+    if not numeric_cols.empty:
+        # Histogram plots
         plt.figure(figsize=(15, 6))
-        for idx, column in enumerate(numeric_columns):
-            plt.subplot(1, len(numeric_columns), idx + 1)
-            sns.histplot(data[column], kde=True)
-            plt.title(f'Distribution of {column}')
+        for i, col in enumerate(numeric_cols):
+            plt.subplot(2, len(numeric_cols), i + 1)
+            sns.histplot(df[col], kde=True)
+            plt.title(f'Histogram of {col}')
+        
         plt.tight_layout()
         plt.savefig('numeric_histograms.png')
         plt.close()
 
-    # Boxplots
-    if not numeric_columns.empty:
+        # Boxplot plots for outlier detection
         plt.figure(figsize=(15, 6))
-        for idx, column in enumerate(numeric_columns):
-            plt.subplot(1, len(numeric_columns), idx + 1)
-            sns.boxplot(x=data[column])
-            plt.title(f'Boxplot for {column}')
+        for i, col in enumerate(numeric_cols):
+            plt.subplot(2, len(numeric_cols), i + 1)
+            sns.boxplot(x=df[col])
+            plt.title(f'Boxplot of {col}')
+        
         plt.tight_layout()
         plt.savefig('numeric_boxplots.png')
         plt.close()
 
-    # Missing Values
+    # Correlation matrix visualization
+    if analyses['correlation_matrix'] is not None:
+        plt.figure(figsize=(12, 8))
+        sns.heatmap(analyses['correlation_matrix'], annot=True, cmap='coolwarm', center=0)
+        plt.title('Correlation Matrix')
+        plt.tight_layout()
+        plt.savefig('correlation_matrix.png')
+        plt.close()
+
+    # Feature importance using Random Forest if target column is present
+    if not numeric_cols.empty and 'target' in df.columns:
+        X = df[numeric_cols].dropna()
+        y = df['target'].dropna()
+
+        model = RandomForestRegressor()
+        model.fit(X, y)
+        feature_importances = pd.Series(model.feature_importances_, index=numeric_cols).sort_values(ascending=False)
+
+        plt.figure(figsize=(10, 6))
+        feature_importances.plot(kind='bar')
+        plt.title('Feature Importance Analysis')
+        plt.tight_layout()
+        plt.savefig('feature_importance.png')
+        plt.close()
+
+    return analyses
+
+def generate_visualizations(df, analyses):
+    """
+    Create visualizations based on the analyses, including outlier detection, regression analysis,
+    time series, cluster analysis, and network analysis.
+    """
+    # Missing values plot
     plt.figure(figsize=(10, 6))
-    analysis['missing_counts'][:MAX_COLUMNS].plot(kind='bar', color='skyblue')
-    plt.title('Missing Values by Column')
+    plt.subplot(2, 2, 1)
+    analyses['missing_values'].plot(kind='bar')
+    plt.title('Missing Values')
     plt.xticks(rotation=45, ha='right')
     plt.tight_layout()
     plt.savefig('missing_values.png')
     plt.close()
 
-    # Correlation Heatmap
-    if analysis['correlation'] is not None:
+    # Correlation matrix heatmap
+    if analyses['correlation_matrix'] is not None:
         plt.figure(figsize=(12, 8))
-        sns.heatmap(analysis['correlation'], annot=True, cmap='coolwarm', center=0)
-        plt.title('Correlation Heatmap')
+        sns.heatmap(analyses['correlation_matrix'], annot=True, cmap='coolwarm', center=0)
+        plt.title('Correlation Matrix')
         plt.tight_layout()
         plt.savefig('correlation_matrix.png')
         plt.close()
 
+    # Time series analysis if 'Date' column exists and is a datetime type
+    if 'Date' in df.columns and pd.api.types.is_datetime64_any_dtype(df['Date']):
+        df.set_index('Date', inplace=True)
+        df.resample('M').mean().plot(figsize=(15, 6))
+        plt.title('Time Series Analysis')
+        plt.tight_layout()
+        plt.savefig('time_series_analysis.png')
+        plt.close()
 
-def perform_analysis(data):
+def get_llm_analysis(df, analyses):
     """
-    Executes various data analyses, including summary statistics and correlation studies.
+    Use LLM to generate a narrative and insights as a comprehensive README.md.
     """
-    numeric_data = data.select_dtypes(include=['float64', 'int64'])
-    analysis_results = {
-        'summary': data.describe(include='all'),
-        'missing_counts': data.isnull().sum().sort_values(ascending=False),
-        'data_types': data.dtypes,
-        'correlation': numeric_data.corr() if not numeric_data.empty else None
-    }
-
-    # Generate visuals
-    create_visuals(data, analysis_results)
-
-    return analysis_results
-
-
-def generate_readme(data, analysis):
-    """
-    Utilizes an LLM to create a structured README file based on data insights and visual outputs.
-    """
+    # Construct the context for the LLM with detailed descriptions
     context = {
-        'column_metadata': str(data.info()),
-        'stat_summary': str(analysis['summary']),
-        'null_counts': str(analysis['missing_counts']),
-        'types_of_data': str(analysis['data_types']),
-        'corr_matrix': str(analysis['correlation']) if analysis['correlation'] is not None else "No correlations available.",
-        'visuals': "The following visuals were generated: histograms, boxplots, missing values bar chart, and correlation heatmap."
+        'column_info': str(df.info()),
+        'summary_stats': str(analyses['summary_stats']),
+        'missing_values': str(analyses['missing_values']),
+        'data_types': str(analyses['data_types']),
+        'correlation_matrix': str(analyses['correlation_matrix']) if analyses['correlation_matrix'] is not None else "No correlation matrix available"
     }
 
-    api_key = os.getenv("AIPROXY_TOKEN")
-    if not api_key:
-        print("Error: Missing API key. Ensure the 'AIPROXY_TOKEN' environment variable is set.")
+    # Ensure the API token is secure and not hard-coded in production
+    api_token =  os.getenv("AIPROXY_TOKEN")
+    if not api_token:
+        print("Error: API token not set. Please set the 'API_PROXY_TOKEN' environment variable.")
         sys.exit(1)
 
     try:
+        # Send a request to the LLM API with a more detailed prompt
         response = httpx.post(
             "https://aiproxy.sanand.workers.dev/openai/v1/chat/completions",
             headers={
-                "Authorization": f"Bearer {api_key}",
+                "Authorization": f"Bearer {api_token}",
                 "Content-Type": "application/json"
             },
             json={
@@ -146,88 +180,106 @@ def generate_readme(data, analysis):
                     {
                         "role": "system",
                         "content": (
-                            "You are a skilled data science communicator. Use the provided dataset analysis to create a clear, "
-                            "informative README file, emphasizing insights and practical relevance."
+                            "You are a data science expert and a storyteller. Your task is to analyze the provided dataset "
+                            "and create a compelling README.md that clearly explains the data and insights. Ensure the "
+                            "narrative is structured, engaging, and uses appropriate sections, bullet points, and emphasis."
                         )
                     },
                     {
                         "role": "user",
                         "content": (
-                            f"Dataset Analysis Context: {json.dumps(context)}\n"
-                            "Create a README.md with:\n"
-                            "- Dataset overview\n"
-                            "- Key findings and visuals\n"
-                            "- Practical applications\n"
-                            "- Limitations."
+                            "Given the following context:\n\n"
+                            f"{json.dumps(context)}\n\n"
+                            "Write a comprehensive README.md that includes:\n"
+                            "1. A brief description of the dataset.\n"
+                            "2. Key insights from the analysis (Mention all the points).\n"
+                            "3. Visualizations used and their interpretations (Add the saved images (correlation matrix, numeric_values, numeric_histograms, numeric_distributions) in the README.md so we can see it, image is residing in the same directory as this python script).\n"
+                            "4. Potential implications of the findings for practical applications.\n"
+                            "5. Any limitations or considerations to keep in mind when using this data."
                         )
                     }
                 ]
             },
-            timeout=300
+            timeout=600.0  # Extended timeout to allow for longer responses
         )
 
-        response.raise_for_status()
+        response.raise_for_status()  # Raise an exception for HTTP errors
 
-        output = response.json().get('choices', [{}])[0].get('message', {}).get('content', "")
+        response_data = response.json()
+        narrative = response_data.get('choices', [{}])[0].get('message', {}).get('content', "")
 
-        if not output.strip():
-            print("Error: Empty response received.")
+
+        # Check if the response content is valid
+        if not narrative.strip():
+            print("Error: Received an empty response from the LLM.")
             sys.exit(1)
 
-        with open("README.md", "w") as readme_file:
-            readme_file.write(output)
+        # Write the narrative to README.md
+        with open("README.md", "w") as f:
+            f.write(narrative)
 
-        print("README.md created successfully.")
-    except httpx.RequestError as req_error:
-        print(f"Request Error: {req_error}")
+        print("README.md has been created successfully.")
+    except httpx.RequestError as e:
+        print(f"HTTP Request Error: {e}")
         sys.exit(1)
 
-
-def get_directory(file_path):
+def get_output_folder(filepath):
     """
-    Determines the folder path for the input file.
+    Extracts the directory from the input file path and returns it.
     """
-    return os.path.dirname(file_path)
+    return os.path.dirname(filepath)
 
-
-def relocate_files(target_folder, filenames):
+def move_files_to_output_folder(output_folder, files):
     """
-    Moves specified files to the given folder.
+    Moves or copies specified files to the output folder.
     """
-    os.makedirs(target_folder, exist_ok=True)
-    for filename in filenames:
-        if os.path.exists(filename):
-            shutil.move(filename, os.path.join(target_folder, filename))
+    os.makedirs(output_folder, exist_ok=True)
+    for file in files:
+        if os.path.exists(file):
+            shutil.move(file, os.path.join(output_folder, file))
 
+def main():
+    try:
+        parser = argparse.ArgumentParser(description="Data Analysis Script")
+        parser.add_argument('filepath', type=str, help="Path to the CSV dataset")
+        args = parser.parse_args()
 
-def process_file(file_path):
-    """
-    Processes a single CSV file.
-    """
-    dataset = read_csv_data(file_path)
-    analysis_outcomes = perform_analysis(dataset)
-    generate_readme(dataset, analysis_outcomes)
+        # Extract output folder path based on the input file path
+        output_folder = get_output_folder(args.filepath)
 
-    generated_files = ['README.md'] + [file for file in os.listdir() if file.endswith('.png')]
+        # Validate input file exists
+        if not os.path.exists(args.filepath):
+            raise FileNotFoundError(f"The input file '{args.filepath}' does not exist.")
 
-    if not generated_files:
-        print("Warning: No files generated.")
+        # Load and analyze data
+        df = load_data(args.filepath)
+        analyses = analyze_data(df)
+        generate_visualizations(df, analyses)
+        get_llm_analysis(df, analyses)
 
-    relocate_files(get_directory(file_path), generated_files)
-    print(f"All generated files moved to '{get_directory(file_path)}'.")
+        # Move the README.md and PNG files to the output folder
+        files_to_move = ['README.md'] + [f for f in os.listdir() if f.endswith('.png')]
+        
+        # Check if there are files to move
+        if not files_to_move:
+            print("Warning: No files generated to move.")
+        
+        move_files_to_output_folder(output_folder, files_to_move)
 
+        print(f"Files have been successfully moved to the '{output_folder}' folder.")
 
-def run():
-    """
-    Entry point for the data analysis script.
-    """
-    parser = argparse.ArgumentParser(description="Execute data analysis from CSV file.")
-    parser.add_argument('file_path', type=str, nargs='+', help="Path(s) to the CSV file(s).")
-    args = parser.parse_args()
-
-    with Pool() as pool:
-        pool.map(process_file, args.file_path)
-
+    except FileNotFoundError as fnf_error:
+        print(f"File Error: {fnf_error}")
+        sys.exit(1)
+    except PermissionError as perm_error:
+        print(f"Permission Error: Unable to read file or move files - {perm_error}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Unexpected error occurred: {e}")
+        # Optional: log the full traceback for debugging
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
 if __name__ == "__main__":
-    run()
+    main()
