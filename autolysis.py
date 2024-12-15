@@ -26,8 +26,12 @@ import json
 import argparse
 from sklearn.ensemble import RandomForestRegressor
 from dotenv import load_dotenv
+from multiprocessing import Pool
 
 load_dotenv()
+
+MAX_COLUMNS = 5  # Limit visualizations to top N columns
+
 
 def read_csv_data(file_path):
     """
@@ -44,17 +48,19 @@ def read_csv_data(file_path):
         print(f"Failed to load data: {error}")
         sys.exit(1)
 
+
 def create_visuals(data, analysis):
     """
     Generates visual outputs including histograms, boxplots, missing values, and correlation heatmaps.
     """
     numeric_columns = data.select_dtypes(include=['float64', 'int64']).columns
+    numeric_columns = numeric_columns[:MAX_COLUMNS]  # Limit to top N columns
 
     # Histograms
     if not numeric_columns.empty:
         plt.figure(figsize=(15, 6))
         for idx, column in enumerate(numeric_columns):
-            plt.subplot(2, len(numeric_columns), idx + 1)
+            plt.subplot(1, len(numeric_columns), idx + 1)
             sns.histplot(data[column], kde=True)
             plt.title(f'Distribution of {column}')
         plt.tight_layout()
@@ -65,7 +71,7 @@ def create_visuals(data, analysis):
     if not numeric_columns.empty:
         plt.figure(figsize=(15, 6))
         for idx, column in enumerate(numeric_columns):
-            plt.subplot(2, len(numeric_columns), idx + 1)
+            plt.subplot(1, len(numeric_columns), idx + 1)
             sns.boxplot(x=data[column])
             plt.title(f'Boxplot for {column}')
         plt.tight_layout()
@@ -74,7 +80,7 @@ def create_visuals(data, analysis):
 
     # Missing Values
     plt.figure(figsize=(10, 6))
-    analysis['missing_counts'].plot(kind='bar', color='skyblue')
+    analysis['missing_counts'][:MAX_COLUMNS].plot(kind='bar', color='skyblue')
     plt.title('Missing Values by Column')
     plt.xticks(rotation=45, ha='right')
     plt.tight_layout()
@@ -90,22 +96,24 @@ def create_visuals(data, analysis):
         plt.savefig('correlation_matrix.png')
         plt.close()
 
+
 def perform_analysis(data):
     """
     Executes various data analyses, including summary statistics and correlation studies.
     """
+    numeric_data = data.select_dtypes(include=['float64', 'int64'])
     analysis_results = {
-        'summary': data.describe(),
-        'missing_counts': data.isnull().sum(),
+        'summary': data.describe(include='all'),
+        'missing_counts': data.isnull().sum().sort_values(ascending=False),
         'data_types': data.dtypes,
-        'correlation': (data.select_dtypes(include=['float64', 'int64']).corr()
-                        if not data.select_dtypes(include=['float64', 'int64']).empty else None)
+        'correlation': numeric_data.corr() if not numeric_data.empty else None
     }
 
     # Generate visuals
     create_visuals(data, analysis_results)
 
     return analysis_results
+
 
 def generate_readme(data, analysis):
     """
@@ -155,7 +163,7 @@ def generate_readme(data, analysis):
                     }
                 ]
             },
-            timeout=600
+            timeout=300
         )
 
         response.raise_for_status()
@@ -174,11 +182,13 @@ def generate_readme(data, analysis):
         print(f"Request Error: {req_error}")
         sys.exit(1)
 
+
 def get_directory(file_path):
     """
     Determines the folder path for the input file.
     """
     return os.path.dirname(file_path)
+
 
 def relocate_files(target_folder, filenames):
     """
@@ -189,21 +199,12 @@ def relocate_files(target_folder, filenames):
         if os.path.exists(filename):
             shutil.move(filename, os.path.join(target_folder, filename))
 
-def run():
+
+def process_file(file_path):
     """
-    Entry point for the data analysis script.
+    Processes a single CSV file.
     """
-    parser = argparse.ArgumentParser(description="Execute data analysis from CSV file.")
-    parser.add_argument('file_path', type=str, help="Path to the CSV file.")
-    args = parser.parse_args()
-
-    destination_folder = get_directory(args.file_path)
-
-    if not os.path.exists(args.file_path):
-        print(f"Error: File '{args.file_path}' not found.")
-        sys.exit(1)
-
-    dataset = read_csv_data(args.file_path)
+    dataset = read_csv_data(file_path)
     analysis_outcomes = perform_analysis(dataset)
     generate_readme(dataset, analysis_outcomes)
 
@@ -212,9 +213,21 @@ def run():
     if not generated_files:
         print("Warning: No files generated.")
 
-    relocate_files(destination_folder, generated_files)
+    relocate_files(get_directory(file_path), generated_files)
+    print(f"All generated files moved to '{get_directory(file_path)}'.")
 
-    print(f"All generated files moved to '{destination_folder}'.")
+
+def run():
+    """
+    Entry point for the data analysis script.
+    """
+    parser = argparse.ArgumentParser(description="Execute data analysis from CSV file.")
+    parser.add_argument('file_path', type=str, nargs='+', help="Path(s) to the CSV file(s).")
+    args = parser.parse_args()
+
+    with Pool() as pool:
+        pool.map(process_file, args.file_path)
+
 
 if __name__ == "__main__":
     run()
