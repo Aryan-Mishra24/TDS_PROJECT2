@@ -1,180 +1,174 @@
-import base64
-import logging
+# /// script
+# dependencies = [
+#   "httpx",
+#   "pandas",
+#   "seaborn",
+#   "scipy",
+#   "matplotlib",
+#   "numpy",
+#   "chardet",
+#   "tabulate",
+#   "requests",
+# ]
+# ///
+
 import os
-import shutil
 import sys
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
-import httpx
-import json
 import requests
-from sklearn.ensemble import RandomForestRegressor
-from dotenv import load_dotenv
-from tenacity import retry, stop_after_attempt, wait_exponential
-import stat
+import chardet
+from scipy.stats import skew, kurtosis
 
-# Load environment variables
-load_dotenv()
+# Load AIPROXY_TOKEN from environment variable
+AIPROXY_TOKEN = os.getenv('AIPROXY_TOKEN')
+if not AIPROXY_TOKEN:
+    print("Error: AIPROXY_TOKEN environment variable not set.")
+    sys.exit(1)
 
-def load_data(filepath, encoding='ISO-8859-1'):
-    """
-    Load CSV file and perform initial data exploration.
-    Supports both local files and URLs.
-    """
-    try:
-        if filepath.startswith("http://") or filepath.startswith("https://"):
-            response = requests.get(filepath)
-            response.raise_for_status()
-            temp_file = "temp_dataset.csv"
-            with open(temp_file, "wb") as f:
-                f.write(response.content)
-            filepath = temp_file
+# API endpoint for OpenAI proxy
+API_ENDPOINT = "https://aiproxy.sanand.workers.dev/openai/v1/chat/completions"
 
-        df = pd.read_csv(filepath, encoding=encoding)
-        print(f"Data Loaded Successfully\nDataset Shape: {df.shape}")
-        print(df.info())
-        return df
-    except Exception as e:
-        logging.error(f"Error loading data: {e}")
-        sys.exit(1)
+def detect_file_encoding(file_path):
+    """Detect file encoding to handle diverse datasets gracefully."""
+    with open(file_path, 'rb') as file:
+        encoding_result = chardet.detect(file.read())
+    return encoding_result.get('encoding', 'utf-8')
 
-def analyze_data(df):
-    """
-    Perform statistical analysis and visualize data.
-    """
-    numeric_cols = df.select_dtypes(include=['float64', 'int64']).columns
-
-    if numeric_cols.empty:
-        logging.warning("No numeric columns found for analysis.")
-        return {}
-
-    analyses = {
-        'summary_stats': df.describe(),
-        'missing_values': df.isnull().sum(),
-        'data_types': df.dtypes,
-        'correlation_matrix': df[numeric_cols].corr()
+def calculate_statistics(dataframe):
+    """Calculate advanced statistics like skewness and kurtosis."""
+    numeric_columns = dataframe.select_dtypes(include=['float64', 'int64'])
+    if numeric_columns.empty:
+        return "No numeric columns found."
+    return {
+        "Skewness": numeric_columns.apply(skew).to_dict(),
+        "Kurtosis": numeric_columns.apply(kurtosis).to_dict(),
     }
 
-    for col in numeric_cols:
-        sns.histplot(df[col], kde=True)
-        plt.title(f'Histogram of {col}')
-        plt.savefig(f'{col}_histogram.png')
-        plt.close()
-
-        sns.boxplot(x=df[col])
-        plt.title(f'Boxplot of {col}')
-        plt.savefig(f'{col}_boxplot.png')
-        plt.close()
-
-    sns.heatmap(analyses['correlation_matrix'], annot=True, cmap='coolwarm')
-    plt.title('Correlation Matrix')
-    plt.savefig('correlation_matrix.png')
-    plt.close()
-
-    return analyses
-
-def create_visualizations(df, analyses):
-    """
-    Generate visualizations based on the data and analyses.
-    """
-    if not analyses.get('missing_values').empty:
-        analyses['missing_values'].plot(kind='bar')
-        plt.title('Missing Values')
-        plt.savefig('missing_values.png')
-        plt.close()
-
-    if 'Date' in df.columns and pd.api.types.is_datetime64_any_dtype(df['Date']):
-        df['Date'] = pd.to_datetime(df['Date'])
-        if not df['Date'].empty:
-            df.set_index('Date').resample('M').mean().plot()
-            plt.title('Time Series Analysis')
-            plt.savefig('time_series_analysis.png')
-            plt.close()
-
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
-def send_request_with_retry(api_token, context):
-    """
-    Send a POST request to the LLM API with retries on failure.
-    """
-    response = httpx.post(
-        "https://aiproxy.sanand.workers.dev/openai/v1/chat/completions",
-        headers={"Authorization": f"Bearer {api_token}"},
-        json={
-            "model": "gpt-4o-mini",
-            "messages": [
-                {"role": "system", "content": "You are a data scientist tasked with creating README.md."},
-                {"role": "user", "content": json.dumps(context)}
-            ]
-        },
-        timeout=600
-    )
-    response.raise_for_status()
-    return response
-
-def generate_readme(df, analyses):
-    """
-    Use an LLM to generate a README.md based on analysis.
-    """
-    context = {
-        'column_info': df.info(),
-        'summary_stats': analyses.get('summary_stats', {}).to_string(),
-        'missing_values': analyses.get('missing_values', {}).to_string(),
-        'data_types': analyses.get('data_types', {}).to_string(),
-        'correlation_matrix': analyses.get('correlation_matrix', {}).to_string() if analyses.get('correlation_matrix') is not None else "None"
-    }
-
-    api_token = os.getenv("AIPROXY_TOKEN")
-    if not api_token:
-        logging.error("API token not found.")
-        sys.exit(1)
-
-    try:
-        response = send_request_with_retry(api_token, context)
-        narrative = response.json()['choices'][0]['message']['content']
-        with open('README.md', 'w') as f:
-            f.write(narrative)
-        print("README.md created successfully.")
-    except httpx.RequestError as e:
-        logging.error(f"Request error: {e}")
-        sys.exit(1)
-
-def onerror(func, path, exc_info):
-    """
-    Error handler for shutil.rmtree to handle readonly files.
-    """
-    os.chmod(path, stat.S_IWRITE)
-    func(path)
-
-def move_files(output_folder):
-    """
-    Move generated files to the specified output folder.
-    """
+def generate_visualizations(dataframe, output_folder):
+    """Generate visualizations and save image files."""
+    visualization_paths = []
+    numeric_columns = dataframe.select_dtypes(include=['float64', 'int64'])
     os.makedirs(output_folder, exist_ok=True)
-    for file in [f for f in os.listdir() if f.endswith(('.png', '.md'))]:
-        shutil.move(file, os.path.join(output_folder, file))
 
-def main():
-    filepath = input("Enter the path to the dataset: ").strip()
-    encoding = input("Enter the file encoding (default 'ISO-8859-1'): ").strip() or 'ISO-8859-1'
+    # Correlation Heatmap
+    if not numeric_columns.empty:
+        try:
+            plt.figure(figsize=(8, 8))
+            correlation_matrix = numeric_columns.corr()
+            sns.heatmap(correlation_matrix, annot=True, cmap="coolwarm", square=True)
+            plt.title("Correlation Heatmap", fontsize=14)
+            plt.xlabel("Features", fontsize=12)
+            plt.ylabel("Features", fontsize=12)
+            heatmap_path = os.path.join(output_folder, "correlation_heatmap.png")
+            plt.savefig(heatmap_path, dpi=150, bbox_inches="tight")
+            visualization_paths.append(heatmap_path)
+            plt.close()
+        except Exception as error:
+            print(f"Error generating correlation heatmap: {error}")
 
-    if filepath.startswith("http://") or filepath.startswith("https://"):
-        logging.info("Downloading dataset from URL...")
-    elif not os.path.exists(filepath):
-        logging.error("Input file not found.")
+    # Missing Values Heatmap
+    try:
+        plt.figure(figsize=(8, 5))
+        sns.heatmap(dataframe.isnull(), cbar=False, cmap="viridis")
+        plt.title("Missing Values Heatmap", fontsize=14)
+        missing_values_path = os.path.join(output_folder, "missing_values_heatmap.png")
+        plt.savefig(missing_values_path, dpi=150, bbox_inches="tight")
+        visualization_paths.append(missing_values_path)
+        plt.close()
+    except Exception as error:
+        print(f"Error generating missing values heatmap: {error}")
+
+    return visualization_paths
+
+def construct_prompt(summary_stats, advanced_stats, correlation_matrix, dataset_name):
+    """Generate a detailed prompt for the LLM based on dataset analysis."""
+    return f"""
+    Below is the analysis summary for the dataset {dataset_name}:
+
+    **Summary Statistics:**
+    ```json
+    {summary_stats}
+    ```
+
+    **Advanced Statistics:**
+    ```json
+    {advanced_stats}
+    ```
+
+    **Correlation Matrix:**
+    ```json
+    {correlation_matrix}
+    ```
+
+    Key Insights:
+    - Describe relationships, gaps, and trends in the dataset.
+    - Recommend actions based on findings.
+    - Highlight strategic implications of these insights.
+
+    Please provide a business-focused report in Markdown format.
+    """
+
+def call_llm(prompt):
+    """Make an API call to the LLM with the generated prompt."""
+    payload = {
+        "model": "gpt-4o-mini",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 1000
+    }
+    response = requests.post(
+        API_ENDPOINT,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {AIPROXY_TOKEN}"
+        },
+        json=payload
+    )
+
+    if response.status_code == 200:
+        return response.json()['choices'][0]['message']['content'].strip()
+    else:
+        print(f"Error: {response.status_code}, {response.text}")
         sys.exit(1)
 
-    df = load_data(filepath, encoding=encoding)
-    analyses = analyze_data(df)
-    create_visualizations(df, analyses)
-    generate_readme(df, analyses)
+def analyze_dataset(file_path):
+    """Main function to analyze a dataset and generate insights and visualizations."""
+    # Detect encoding and load dataset
+    encoding = detect_file_encoding(file_path)
+    dataframe = pd.read_csv(file_path, encoding=encoding)
+    dataset_name = os.path.splitext(os.path.basename(file_path))[0]
+    output_folder = dataset_name
+    os.makedirs(output_folder, exist_ok=True)
 
-    try:
-        move_files(os.path.dirname(filepath))
-    except PermissionError as e:
-        logging.error(f"Permission error during file move: {e}")
-        shutil.rmtree(os.path.dirname(filepath), onerror=onerror)
+    # Generate statistics
+    summary_stats = dataframe.describe(include='all').to_dict()
+    advanced_stats = calculate_statistics(dataframe)
+    numeric_columns = dataframe.select_dtypes(include=['float64', 'int64'])
+    correlation_matrix = numeric_columns.corr().to_dict() if not numeric_columns.empty else "N/A"
+
+    # Generate visualizations
+    visualization_paths = generate_visualizations(dataframe, output_folder)
+
+    # Construct prompt and call LLM
+    prompt = construct_prompt(summary_stats, advanced_stats, correlation_matrix, dataset_name)
+    insights = call_llm(prompt)
+
+    # Save results to README.md
+    readme_path = os.path.join(output_folder, "README.md")
+    with open(readme_path, "w", encoding="utf-8") as readme_file:
+        readme_file.write(f"# Analysis of {dataset_name}\n\n")
+        readme_file.write("## Insights and Recommendations\n\n")
+        readme_file.write("### Business Report\n")
+        readme_file.write(insights)
+        readme_file.write("\n\n### Visualizations\n")
+        for vis_path in visualization_paths:
+            readme_file.write(f"![{os.path.basename(vis_path)}]({os.path.basename(vis_path)})\n")
+
+    print(f"Analysis complete for {dataset_name}. Results saved in {readme_path}.")
 
 if __name__ == "__main__":
-    main()
-
+    if len(sys.argv) != 2:
+        print("Usage: python script.py <dataset.csv>")
+        sys.exit(1)
+    analyze_dataset(sys.argv[1])
